@@ -1,6 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:rxdart/rxdart.dart';
-import 'package:superheroes/pages/main_page.dart';
+import 'package:http/http.dart' as http;
+import 'package:superheroes/exception/api_exception.dart';
+import 'package:superheroes/model/superhero.dart';
 
 class MainBloc {
   static const minSymbols = 3;
@@ -18,21 +22,25 @@ class MainBloc {
   Stream<List<SuperheroInfo>> observeFavoriteSuperheroes() =>
       favoriteSuperheroesSubject;
 
-  MainBloc() {
+  http.Client? client;
+
+  MainBloc({this.client}) {
     stateSubject.add(MainPageState.noFavorites);
 
-    textSubscription = Rx.combineLatest2<String, List<SuperheroInfo>, MainPageStateInfo>(
-        currentTextSubject
-            .distinct()
-            .debounceTime(const Duration(milliseconds: 500)),
-        favoriteSuperheroesSubject,
-        (searchedText, favorites) => MainPageStateInfo(searchedText, favorites.isNotEmpty)).listen((value) {
-      print('Cange $value');
+    textSubscription =
+        Rx.combineLatest2<String, List<SuperheroInfo>, MainPageStateInfo>(
+                currentTextSubject
+                    .distinct()
+                    .debounceTime(const Duration(milliseconds: 500)),
+                favoriteSuperheroesSubject,
+                (searchedText, favorites) =>
+                    MainPageStateInfo(searchedText, favorites.isNotEmpty))
+            .listen((value) {
       searchSubscription?.cancel();
       if (value.searchText.isEmpty) {
-        if(value.haveFavorites){
+        if (value.haveFavorites) {
           stateSubject.add(MainPageState.favorites);
-        }else{
+        } else {
           stateSubject.add(MainPageState.noFavorites);
         }
         stateSubject.add(MainPageState.favorites);
@@ -54,23 +62,57 @@ class MainBloc {
         stateSubject.add(MainPageState.searchResults);
       }
     }, onError: (error, StackTrace) {
-      stateSubject.add(MainPageState.loading);
+      print(error);
+      stateSubject.add(MainPageState.loadingError);
     });
   }
 
   Future<List<SuperheroInfo>> search(final String text) async {
-    await Future.delayed(const Duration(seconds: 1));
-    return SuperheroInfo.moked.where((superheroInfo) => superheroInfo.name.toLowerCase().contains(text.toLowerCase())).toList();
+    final token = dotenv.env["SUPERHERO_TOKEN"];
+    final response = await (client ??= http.Client())
+        .get(Uri.parse("https://superheroapi.com/api/$token/search/$text"));
+    if(response.statusCode >= 500 && response.statusCode <=599){
+      throw ApiException ('"Server error happened');
+    }
+    if (response.statusCode >= 400 && response.statusCode <= 499) {
+      throw ApiException ('Client error happened');
+    } 
+    final decoded = json.decode(response.body);
+    if (decoded['response'] == 'success') {
+      final List<dynamic> results = decoded['results'];
+      final List<Superhero> superheroes = results
+          .map((rawSuperhero) => Superhero.fromJson(rawSuperhero))
+          .toList();
+      final List<SuperheroInfo> found = superheroes.map((superhero) {
+        return SuperheroInfo(
+          name: superhero.name,
+          realName: superhero.biography.fullName,
+          imageUrl: superhero.image.url,
+        );
+      }).toList();
+      return found;
+    } else if (decoded['response'] == 'error') {
+      if (decoded['error'] == 'character with given name not found') {
+        return [];
+      }throw ApiException('Client error happened');
+    }
+    throw Exception('Unknow error happened');
   }
 
   Stream<MainPageState> observeMainPageState() => stateSubject;
 
-  void remoteFavorite (){
-    final List<SuperheroInfo> currentFavorites = favoriteSuperheroesSubject.value;
-    if(currentFavorites.isEmpty){
+  void retry(){
+
+  }
+
+  void removeFavorite() {
+    final List<SuperheroInfo> currentFavorites =
+        favoriteSuperheroesSubject.value;
+    if (currentFavorites.isEmpty) {
       favoriteSuperheroesSubject.add(SuperheroInfo.moked);
     } else {
-      favoriteSuperheroesSubject.add(currentFavorites.sublist(0, currentFavorites.length-1));
+      favoriteSuperheroesSubject
+          .add(currentFavorites.sublist(0, currentFavorites.length - 1));
     }
   }
 
@@ -93,6 +135,7 @@ class MainBloc {
     currentTextSubject.close();
 
     textSubscription?.cancel();
+    client?.close();
   }
 }
 
@@ -158,12 +201,12 @@ class MainPageStateInfo {
   final String searchText;
   final bool haveFavorites;
 
-   MainPageStateInfo(this.searchText, this.haveFavorites);
+  MainPageStateInfo(this.searchText, this.haveFavorites);
 
   @override
   String toString() {
     return 'MainPageStateInfo{searchText: $searchText, haveFavorites: $haveFavorites}';
-  }
+  } 
 
   @override
   bool operator ==(Object other) =>
